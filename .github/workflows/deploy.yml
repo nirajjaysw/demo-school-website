@@ -1,0 +1,79 @@
+name: Deploy Oakridge School ERP Prototype to GitHub Pages
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build_and_validate:
+    name: Build, Audit & Validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Audit Repository for Exposed Secrets
+        run: |
+          echo "Scanning repository for exposed keys or credentials..."
+          SECRET_MATCHES=$(grep -rnE --exclude-dir=".git" --exclude-dir=".github" --exclude-dir="node_modules" --exclude-dir="dist" "(AIza[0-9A-Za-z_-]{35}|ghp_[0-9a-zA-Z]{36}|AKIA[0-9A-Z]{16}|-----BEGIN (RSA|EC|OPENSSH) PRIVATE KEY-----)" . || true)
+          if [ -n "$SECRET_MATCHES" ]; then
+            echo "::error::Suspicious secret pattern detected in repository!"
+            echo "$SECRET_MATCHES"
+            exit 1
+          fi
+          echo "Secret scan clean: No secrets detected."
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Build Production Bundle
+        run: npm run build
+
+      - name: Prepare SPA Fallback & Verify CNAME
+        run: |
+          echo "Verifying build outputs..."
+          test -f dist/index.html || (echo "::error::dist/index.html missing!" && exit 1)
+          test -f dist/CNAME || (echo "::error::dist/CNAME missing! CNAME must be present for custom domain." && exit 1)
+          grep -q "schoolerp.knowvasystems.com" dist/CNAME || (echo "::error::dist/CNAME does not match schoolerp.knowvasystems.com" && exit 1)
+          echo "Creating 404.html fallback for client-side routing..."
+          cp dist/index.html dist/404.html
+          echo "Build & domain verification passed."
+
+      - name: Upload Artifact for Deployment
+        if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: 'dist'
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build_and_validate
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
